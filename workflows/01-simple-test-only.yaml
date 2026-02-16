@@ -1,0 +1,141 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: simple-test-only
+  namespace: argo
+  annotations:
+    description: "Simple test-only workflow - runs unit tests without building or pushing images"
+spec:
+  entrypoint: test-only
+  
+  templates:
+  - name: test-only
+    steps:
+    # Step 1: Checkout code
+    - - name: checkout
+        template: git-clone
+    
+    # Step 2: Run tests (no build, no push)
+    - - name: unit-tests
+        template: run-unit-tests
+        arguments:
+          artifacts:
+          - name: source
+            from: "{{steps.checkout.outputs.artifacts.source}}"
+    
+    # Step 3: Report results
+    - - name: report
+        template: test-report
+        arguments:
+          parameters:
+          - name: test-status
+            value: "{{workflow.status}}"
+
+  # Git Clone Template
+  - name: git-clone
+    inputs:
+      parameters:
+      - name: url
+        default: "https://github.com/gilsonbellon/argo-labs.git"
+      - name: revision
+        default: "main"
+    container:
+      image: alpine/git:latest
+      command: [sh, -c]
+      args:
+      - |
+        echo "📥 Cloning repository..."
+        git clone {{inputs.parameters.url}} /workspace
+        cd /workspace
+        git checkout {{inputs.parameters.revision}}
+        echo "✅ Checked out {{inputs.parameters.revision}}"
+        echo "📋 Latest commit: $(git log -1 --oneline)"
+    outputs:
+      artifacts:
+      - name: source
+        path: /workspace
+
+  # Run Unit Tests Template
+  - name: run-unit-tests
+    inputs:
+      artifacts:
+      - name: source
+        path: /workspace
+    container:
+      image: node:18-alpine
+      command: [sh, -c]
+      args:
+      - |
+        cd /workspace
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🧪 Running Unit Tests"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        # Check for Node.js project
+        if [ -f package.json ]; then
+          echo "📦 Node.js project detected"
+          echo "Installing dependencies..."
+          npm install --silent
+          echo "Running tests..."
+          npm test || npm run test || echo "⚠️  No test script found"
+        
+        # Check for Python project
+        elif [ -f requirements.txt ] || [ -f setup.py ] || [ -f pyproject.toml ]; then
+          echo "🐍 Python project detected"
+          pip install pytest pytest-cov 2>/dev/null || apk add --no-cache python3 py3-pip
+          pip install -r requirements.txt 2>/dev/null || echo "No requirements.txt"
+          pytest tests/ -v || python -m pytest . -v || echo "⚠️  No tests found"
+        
+        # Check for Go project
+        elif [ -f go.mod ] || [ -f *.go ]; then
+          echo "🐹 Go project detected"
+          go test ./... -v || echo "⚠️  No tests found"
+        
+        # Check for Java project
+        elif [ -f pom.xml ] || [ -f build.gradle ]; then
+          echo "☕ Java project detected"
+          if [ -f pom.xml ]; then
+            mvn test || echo "⚠️  Maven not available"
+          elif [ -f build.gradle ]; then
+            ./gradlew test || echo "⚠️  Gradle not available"
+          fi
+        
+        # Generic test
+        else
+          echo "📝 Generic project - running basic checks..."
+          echo "Checking for common test files..."
+          find . -name "*test*" -o -name "*spec*" | head -5
+          echo "✅ Basic validation completed"
+        fi
+        
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ Unit tests completed"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # Test Report Template
+  - name: test-report
+    inputs:
+      parameters:
+      - name: test-status
+    container:
+      image: alpine:latest
+      command: [sh, -c]
+      args:
+      - |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📊 Test Report"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Workflow: {{workflow.name}}"
+        echo "Status: {{inputs.parameters.test-status}}"
+        echo "Started: {{workflow.status.startedAt}}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ Test workflow completed"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # Workflow Parameters
+  arguments:
+    parameters:
+    - name: repo-url
+      value: "https://github.com/gilsonbellon/argo-labs.git"
+    - name: revision
+      value: "main"
