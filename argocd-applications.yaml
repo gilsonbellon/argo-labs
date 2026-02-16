@@ -1,0 +1,82 @@
+---
+# ArgoCD Application for Staging Environment
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: staging-vote
+  namespace: argocd
+  # Optional: Add finalizers for cascade deletion
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  
+  # Source configuration - points to your Git repository
+  source:
+    repoURL: https://github.com/gilsonbellon/argo-labs.git
+    targetRevision: HEAD  # or specific branch/tag
+    path: staging  # Path relative to repository root (contains kustomization.yaml)
+    
+    # Explicitly specify Kustomize (ArgoCD will auto-detect, but being explicit helps)
+    kustomize:
+      # Optional: specify kustomize version
+      # version: v4.5.7
+      
+  # Destination cluster and namespace
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: staging
+  
+  # Sync policy
+  syncPolicy:
+    automated:
+      prune: true      # Delete resources when removed from Git
+      selfHeal: true   # Automatically sync when cluster state drifts
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true  # Create namespace if it doesn't exist
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+---
+# ArgoCD Application for Production Environment
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: prod-vote
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  
+  source:
+    repoURL: https://github.com/gilsonbellon/argo-labs.git
+    targetRevision: HEAD
+    path: prod  # Path relative to repository root (contains kustomization.yaml)
+    
+    kustomize:
+      # Optional: specify kustomize version
+      # version: v4.5.7
+      
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
