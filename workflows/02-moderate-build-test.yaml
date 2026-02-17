@@ -7,6 +7,7 @@ metadata:
     description: "Moderate workflow - builds Docker image and runs tests, but does NOT push to registry"
 spec:
   entrypoint: build-and-test
+  serviceAccountName: argo-workflow
   
   templates:
   - name: build-and-test
@@ -101,6 +102,16 @@ spec:
       command: [sh, -c]
       args:
       - |
+        # Start Docker daemon
+        dockerd-entrypoint.sh &
+        sleep 5
+        
+        # Wait for Docker daemon to be ready
+        until docker info >/dev/null 2>&1; do
+          echo "Waiting for Docker daemon..."
+          sleep 1
+        done
+        
         apk add --no-cache docker-cli
         cd /workspace
         
@@ -121,28 +132,48 @@ spec:
         fi
         
         echo "Building {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}}..."
-        docker build -t {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}} .
-        docker save {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}} -o /tmp/image.tar
+        if ! docker build -t {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}} .; then
+          echo "❌ Docker build failed"
+          exit 1
+        fi
+        
+        # Verify image was created
+        if ! docker images {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}} | grep -q {{inputs.parameters.image-name}}; then
+          echo "❌ Image was not created"
+          exit 1
+        fi
+        
+        # Save image
+        echo "Saving image to /tmp/image.tar..."
+        if ! docker save {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}} -o /tmp/image.tar; then
+          echo "❌ Failed to save image"
+          exit 1
+        fi
+        
+        # Verify tar file was created
+        if [ ! -f /tmp/image.tar ]; then
+          echo "❌ Image tar file was not created"
+          echo "Debug: Checking /tmp directory..."
+          ls -la /tmp/ | head -10
+          exit 1
+        fi
+        
+        # Show file size
+        FILE_SIZE=$(du -h /tmp/image.tar | cut -f1)
+        echo "✅ Image tar created: /tmp/image.tar (${FILE_SIZE})"
         
         # Show image info
         docker images {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}}
         
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "✅ Image built successfully"
+        echo "✅ Image built and saved successfully"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      volumeMounts:
-      - name: docker-sock
-        mountPath: /var/run
       securityContext:
         privileged: true
     outputs:
       artifacts:
       - name: image
         path: /tmp/image.tar
-    volumes:
-    - name: docker-sock
-      hostPath:
-        path: /var/run/docker.sock
 
   # Code Lint Template
   - name: code-lint
@@ -151,10 +182,11 @@ spec:
       - name: source
         path: /workspace
     container:
-      image: hadolint/hadolint:latest
+      image: alpine:latest
       command: [sh, -c]
       args:
       - |
+        apk add --no-cache hadolint shellcheck
         cd /workspace
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "🔍 Running Code Linting"
@@ -164,11 +196,13 @@ spec:
         if [ -f Dockerfile ]; then
           echo "Linting Dockerfile..."
           hadolint Dockerfile || echo "⚠️  Lint warnings found"
+        else
+          echo "ℹ️  No Dockerfile found, skipping Dockerfile lint"
         fi
         
         # Check for common code issues
         echo "Checking code quality..."
-        find . -name "*.sh" -exec shellcheck {} \; 2>/dev/null || echo "ShellCheck not available"
+        find . -name "*.sh" -exec shellcheck {} \; 2>/dev/null || echo "ℹ️  No shell scripts found or ShellCheck completed"
         
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "✅ Linting completed"
@@ -216,23 +250,107 @@ spec:
       command: [sh, -c]
       args:
       - |
+        # Debug: Check what artifacts were downloaded
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🔍 Debug: Checking downloaded artifacts"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Contents of /tmp:"
+        ls -la /tmp/ 2>/dev/null | head -20 || echo "  (empty or not accessible)"
+        echo ""
+        echo "Contents of /workspace:"
+        ls -la /workspace 2>/dev/null | head -10 || echo "  (empty or not accessible)"
+        echo ""
+        echo "Searching for image files:"
+        find /tmp /workspace -name "*image*" -o -name "*.tar" -o -name "*.tgz" 2>/dev/null | head -10 || echo "  (none found)"
+        echo ""
+        echo "Checking Argo artifact paths:"
+        ls -la /var/run/argo/ 2>/dev/null || echo "  (not found)"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        
+        # Start Docker daemon
+        dockerd-entrypoint.sh &
+        sleep 5
+        
+        # Wait for Docker daemon to be ready
+        until docker info >/dev/null 2>&1; do
+          echo "Waiting for Docker daemon..."
+          sleep 1
+        done
+        
         apk add --no-cache docker-cli curl
-        docker load -i /tmp/image.tar
+        
+        # Check for artifact (Argo should download it automatically)
+        # Try multiple possible locations
+        ARTIFACT_FILE=""
+        
+        # Check standard location
+        if [ -f /tmp/image.tar ]; then
+          ARTIFACT_FILE="/tmp/image.tar"
+          echo "✅ Found artifact at /tmp/image.tar"
+        elif [ -f /tmp/image.tgz ]; then
+          echo "✅ Found compressed artifact, extracting..."
+          tar -xzf /tmp/image.tgz -C /tmp/
+          if [ -f /tmp/image.tar ]; then
+            ARTIFACT_FILE="/tmp/image.tar"
+          else
+            ARTIFACT_FILE="/tmp/image.tgz"
+          fi
+        else
+          # Artifact not found - this shouldn't happen but let's fail gracefully
+          echo "⚠️  Artifact not found at expected location"
+          echo ""
+          echo "This usually means:"
+          echo "1. The artifact wasn't downloaded by Argo's init container"
+          echo "2. There's an issue with artifact passing between steps"
+          echo ""
+          echo "The docker-build step completed successfully and saved the artifact to MinIO."
+          echo "Please check:"
+          echo "  - Init container logs: kubectl logs <pod-name> -c init"
+          echo "  - Workflow status: kubectl get workflow <workflow-name> -n argo -o yaml"
+          echo ""
+          exit 1
+        fi
+        
+        # Check file size
+        FILE_SIZE=$(du -h /tmp/image.tar | cut -f1)
+        echo "✅ Found artifact: /tmp/image.tar (${FILE_SIZE})"
+        
+        echo "Loading image from ${ARTIFACT_FILE}..."
+        docker load -i ${ARTIFACT_FILE}
         
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "🧪 Testing Built Image"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         
-        # Get image name from loaded images
-        IMAGE_NAME=$(docker images --format "{{.Repository}}:{{.Tag}}" | head -1)
-        echo "Testing image: ${IMAGE_NAME}"
+        # List all images to debug
+        echo "Available images:"
+        docker images
         
-        # Start container
-        CONTAINER_ID=$(docker run -d ${IMAGE_NAME} sleep 30)
+        # Get image name from loaded images (most recent one)
+        IMAGE_NAME=$(docker images --format "{{.Repository}}:{{.Tag}}" | head -1)
+        
+        if [ -z "$IMAGE_NAME" ] || [ "$IMAGE_NAME" == "<none>:<none>" ]; then
+          echo "⚠️  Could not determine image name, trying alternative method..."
+          # Try getting image ID instead
+          IMAGE_ID=$(docker images -q | head -1)
+          if [ -n "$IMAGE_ID" ]; then
+            IMAGE_NAME=$IMAGE_ID
+            echo "Using image ID: ${IMAGE_NAME}"
+          else
+            echo "❌ No image found after loading"
+            exit 1
+          fi
+        else
+          echo "Testing image: ${IMAGE_NAME}"
+        fi
+        
+        # Start container with explicit command
+        CONTAINER_ID=$(docker run -d ${IMAGE_NAME} sh -c "sleep 30")
         sleep 3
         
-        # Run tests
-        if docker ps | grep -q $CONTAINER_ID; then
+        # Run tests - check if container is running
+        if docker ps --no-trunc --format "{{.ID}}" | grep -Fq "${CONTAINER_ID}"; then
           echo "✅ Container started successfully"
           echo "Running container tests..."
           docker logs $CONTAINER_ID
@@ -252,15 +370,8 @@ spec:
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "✅ Integration tests completed"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      volumeMounts:
-      - name: docker-sock
-        mountPath: /var/run
       securityContext:
         privileged: true
-    volumes:
-    - name: docker-sock
-      hostPath:
-        path: /var/run/docker.sock
 
   # Generate Build Report Template
   - name: generate-build-report

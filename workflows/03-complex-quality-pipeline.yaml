@@ -7,6 +7,7 @@ metadata:
     description: "Complex quality assurance pipeline - comprehensive tests, scans, and checks without building/pushing images"
 spec:
   entrypoint: quality-pipeline
+  serviceAccountName: argo-workflow
   
   templates:
   - name: quality-pipeline

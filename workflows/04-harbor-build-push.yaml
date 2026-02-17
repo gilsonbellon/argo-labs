@@ -7,6 +7,7 @@ metadata:
     description: "ONLY template that builds and pushes Docker images to Harbor registry - harborngp.34-147-139-99.sslip.io/gil-test/REPOSITORY[:TAG]"
 spec:
   entrypoint: harbor-build-push
+  serviceAccountName: argo-workflow
   
   templates:
   - name: harbor-build-push

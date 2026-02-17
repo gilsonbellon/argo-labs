@@ -7,6 +7,7 @@ metadata:
     description: "Simple test-only workflow - runs unit tests without building or pushing images"
 spec:
   entrypoint: test-only
+  serviceAccountName: argo-workflow
   
   templates:
   - name: test-only
@@ -127,7 +128,7 @@ spec:
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "Workflow: {{workflow.name}}"
         echo "Status: {{inputs.parameters.test-status}}"
-        echo "Started: {{workflow.status.startedAt}}"
+        echo "Completed: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "✅ Test workflow completed"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
