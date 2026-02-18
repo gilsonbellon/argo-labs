@@ -60,16 +60,34 @@ spec:
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "📥 Cloning Repository"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        git clone {{inputs.parameters.repo-url}} /workspace
-        cd /workspace
+        echo "Repository: {{inputs.parameters.repo-url}}"
+        echo "Branch: {{inputs.parameters.branch}}"
+        
+        # Create workspace directory first
+        mkdir -p /workspace
+        
+        # Clone repository
+        if ! git clone {{inputs.parameters.repo-url}} /workspace; then
+          echo "❌ Git clone failed!"
+          exit 1
+        fi
         
         # Handle GitHub ref format (refs/heads/main -> main)
         BRANCH="{{inputs.parameters.branch}}"
         BRANCH=$(echo "$BRANCH" | sed 's|refs/heads/||')
         
-        git checkout "$BRANCH"
+        cd /workspace
+        if ! git checkout "$BRANCH"; then
+          echo "❌ Failed to checkout branch: $BRANCH"
+          exit 1
+        fi
+        
         echo "✅ Checked out branch: $BRANCH"
         echo "📋 Latest commit: $(git log -1 --oneline)"
+        
+        # Ensure workspace exists and has content for artifact archiving
+        echo "📁 Workspace contents:"
+        ls -la /workspace | head -10
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     outputs:
       artifacts:
