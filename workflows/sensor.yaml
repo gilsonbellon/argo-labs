@@ -14,29 +14,14 @@ spec:
     - template:
         name: launch-vote-ci
         argoWorkflow:
-          operation: submit
+          operation: submit-from
           source:
-            inline: |
+            resource:
               apiVersion: argoproj.io/v1alpha1
-              kind: Workflow
+              kind: WorkflowTemplate
               metadata:
-                generateName: vote-ci-template-
+                name: vote-ci-template
                 namespace: argo
-              spec:
-                workflowTemplateRef:
-                  name: vote-ci-template
-                arguments:
-                  parameters:
-                  - name: repo-url
-                    value: "{{workflow.parameters.repo-url}}"
-                  - name: branch
-                    value: "{{workflow.parameters.branch}}"
-                  - name: image
-                    value: "{{workflow.parameters.image}}"
-                  - name: harbor-username
-                    value: "{{workflow.parameters.harbor-username}}"
-                  - name: harbor-password
-                    value: "{{workflow.parameters.harbor-password}}"
           parameters:
             - src:
                 dependencyName: poll-github
