@@ -243,31 +243,14 @@ spec:
       artifacts:
       - name: source
         path: /workspace
+      # Use /workspace path to avoid mount conflicts with /tmp
       - name: image
-        path: /tmp/image.tar
+        path: /workspace/image.tar
     container:
       image: docker:dind
       command: [sh, -c]
       args:
       - |
-        # Debug: Check what artifacts were downloaded
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "🔍 Debug: Checking downloaded artifacts"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "Contents of /tmp:"
-        ls -la /tmp/ 2>/dev/null | head -20 || echo "  (empty or not accessible)"
-        echo ""
-        echo "Contents of /workspace:"
-        ls -la /workspace 2>/dev/null | head -10 || echo "  (empty or not accessible)"
-        echo ""
-        echo "Searching for image files:"
-        find /tmp /workspace -name "*image*" -o -name "*.tar" -o -name "*.tgz" 2>/dev/null | head -10 || echo "  (none found)"
-        echo ""
-        echo "Checking Argo artifact paths:"
-        ls -la /var/run/argo/ 2>/dev/null || echo "  (not found)"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo ""
-        
         # Start Docker daemon
         dockerd-entrypoint.sh &
         sleep 5
@@ -280,44 +263,26 @@ spec:
         
         apk add --no-cache docker-cli curl
         
-        # Check for artifact (Argo should download it automatically)
-        # Try multiple possible locations
-        ARTIFACT_FILE=""
-        
-        # Check standard location
-        if [ -f /tmp/image.tar ]; then
-          ARTIFACT_FILE="/tmp/image.tar"
-          echo "✅ Found artifact at /tmp/image.tar"
-        elif [ -f /tmp/image.tgz ]; then
-          echo "✅ Found compressed artifact, extracting..."
-          tar -xzf /tmp/image.tgz -C /tmp/
-          if [ -f /tmp/image.tar ]; then
-            ARTIFACT_FILE="/tmp/image.tar"
-          else
-            ARTIFACT_FILE="/tmp/image.tgz"
-          fi
-        else
-          # Artifact not found - this shouldn't happen but let's fail gracefully
-          echo "⚠️  Artifact not found at expected location"
+        # Verify artifact exists (Argo automatically downloads and decompresses it)
+        if [ ! -f /workspace/image.tar ]; then
+          echo "❌ Error: /workspace/image.tar not found!"
           echo ""
-          echo "This usually means:"
-          echo "1. The artifact wasn't downloaded by Argo's init container"
-          echo "2. There's an issue with artifact passing between steps"
+          echo "Debug info:"
+          echo "  Contents of /workspace:"
+          ls -la /workspace/ 2>/dev/null | head -10 || echo "    (empty)"
           echo ""
-          echo "The docker-build step completed successfully and saved the artifact to MinIO."
-          echo "Please check:"
-          echo "  - Init container logs: kubectl logs <pod-name> -c init"
-          echo "  - Workflow status: kubectl get workflow <workflow-name> -n argo -o yaml"
-          echo ""
+          echo "  This usually means the artifact wasn't downloaded from MinIO."
+          echo "  Check init container logs: kubectl logs <pod-name> -c init"
           exit 1
         fi
         
-        # Check file size
-        FILE_SIZE=$(du -h /tmp/image.tar | cut -f1)
-        echo "✅ Found artifact: /tmp/image.tar (${FILE_SIZE})"
+        # Show artifact info
+        FILE_SIZE=$(du -h /workspace/image.tar | cut -f1)
+        echo "✅ Artifact found: /workspace/image.tar (${FILE_SIZE})"
         
-        echo "Loading image from ${ARTIFACT_FILE}..."
-        docker load -i ${ARTIFACT_FILE}
+        # Load Docker image from artifact
+        echo "Loading Docker image from /workspace/image.tar..."
+        docker load -i /workspace/image.tar
         
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "🧪 Testing Built Image"

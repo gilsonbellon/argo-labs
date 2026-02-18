@@ -352,7 +352,7 @@ spec:
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "Workflow: {{workflow.name}}"
         echo "Status: {{workflow.status}}"
-        echo "Started: {{workflow.status.startedAt}}"
+        echo "Report Generated: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
         echo ""
         echo "Quality Checks Completed:"
         echo "  ✅ Static code analysis"

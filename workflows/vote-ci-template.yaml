@@ -1,16 +1,16 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: harbor-build-push
+  name: vote-ci-template
   namespace: argo
   annotations:
-    description: "ONLY template that builds and pushes Docker images to Harbor registry - harborngp.34-147-139-99.sslip.io/gil-test/REPOSITORY[:TAG]"
+    description: "CI pipeline for vote app - builds and pushes Docker images to Harbor registry"
 spec:
-  entrypoint: harbor-build-push
+  entrypoint: vote-ci-pipeline
   serviceAccountName: argo-workflow
   
   templates:
-  - name: harbor-build-push
+  - name: vote-ci-pipeline
     steps:
     # Step 1: Checkout source code
     - - name: checkout
@@ -19,18 +19,16 @@ spec:
           parameters:
           - name: repo-url
             value: "{{workflow.parameters.repo-url}}"
-          - name: revision
-            value: "{{workflow.parameters.revision}}"
+          - name: branch
+            value: "{{workflow.parameters.branch}}"
     
     # Step 2: Build Docker image
     - - name: build
         template: docker-build
         arguments:
           parameters:
-          - name: dockerfile-path
-            value: "{{workflow.parameters.dockerfile-path}}"
-          - name: build-context
-            value: "{{workflow.parameters.build-context}}"
+          - name: dockerfile
+            value: "{{workflow.parameters.dockerfile}}"
           artifacts:
           - name: source
             from: "{{steps.checkout.outputs.artifacts.source}}"
@@ -40,41 +38,39 @@ spec:
         template: push-to-harbor
         arguments:
           parameters:
-          - name: repository
-            value: "{{workflow.parameters.repository}}"
+          - name: image
+            value: "{{workflow.parameters.image}}"
           - name: tag
-            value: "{{workflow.parameters.tag}}"
+            value: "{{workflow.name}}"
           artifacts:
           - name: image
             from: "{{steps.build.outputs.artifacts.image}}"
-    
-    # Step 4: Verify push
-    - - name: verify
-        template: verify-harbor-image
-        arguments:
-          parameters:
-          - name: repository
-            value: "{{workflow.parameters.repository}}"
-          - name: tag
-            value: "{{workflow.parameters.tag}}"
 
   # Git Clone Template
   - name: git-clone
     inputs:
       parameters:
       - name: repo-url
-      - name: revision
+      - name: branch
     container:
       image: alpine/git:latest
       command: [sh, -c]
       args:
       - |
-        echo "📥 Cloning repository..."
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📥 Cloning Repository"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         git clone {{inputs.parameters.repo-url}} /workspace
         cd /workspace
-        git checkout {{inputs.parameters.revision}}
-        echo "✅ Checked out {{inputs.parameters.revision}}"
+        
+        # Handle GitHub ref format (refs/heads/main -> main)
+        BRANCH="{{inputs.parameters.branch}}"
+        BRANCH=$(echo "$BRANCH" | sed 's|refs/heads/||')
+        
+        git checkout "$BRANCH"
+        echo "✅ Checked out branch: $BRANCH"
         echo "📋 Latest commit: $(git log -1 --oneline)"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     outputs:
       artifacts:
       - name: source
@@ -84,10 +80,8 @@ spec:
   - name: docker-build
     inputs:
       parameters:
-      - name: dockerfile-path
+      - name: dockerfile
         default: "Dockerfile"
-      - name: build-context
-        default: "."
       artifacts:
       - name: source
         path: /workspace
@@ -109,33 +103,23 @@ spec:
         apk add --no-cache docker-cli
         cd /workspace
         
-        DOCKERFILE="{{inputs.parameters.dockerfile-path}}"
-        BUILD_CONTEXT="{{inputs.parameters.build-context}}"
+        DOCKERFILE="{{inputs.parameters.dockerfile}}"
         IMAGE_NAME="build-image"
         IMAGE_TAG="{{workflow.name}}"
         
-        echo "🔨 Building Docker image..."
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🔨 Building Docker Image"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "📄 Dockerfile: ${DOCKERFILE}"
-        echo "📁 Build context: ${BUILD_CONTEXT}"
         
         # Check if Dockerfile exists
         if [ ! -f "${DOCKERFILE}" ]; then
-          echo "⚠️  Dockerfile not found at ${DOCKERFILE}, creating a simple one..."
-          cat > ${DOCKERFILE} <<'EOF'
-        FROM alpine:latest
-        LABEL maintainer="Argo Workflows"
-        RUN apk add --no-cache curl
-        WORKDIR /app
-        COPY . /app
-        CMD ["sh", "-c", "echo 'Hello from Harbor!' && sleep infinity"]
-        EOF
+          echo "❌ Dockerfile not found at ${DOCKERFILE}"
+          exit 1
         fi
         
         # Build the image
-        docker build \
-          -f ${DOCKERFILE} \
-          -t ${IMAGE_NAME}:${IMAGE_TAG} \
-          ${BUILD_CONTEXT}
+        docker build -f ${DOCKERFILE} -t ${IMAGE_NAME}:${IMAGE_TAG} .
         
         # Verify image was created
         if ! docker images ${IMAGE_NAME}:${IMAGE_TAG} | grep -q ${IMAGE_NAME}; then
@@ -143,7 +127,7 @@ spec:
           exit 1
         fi
         
-        # Save image to artifact (use /tmp for output, Argo will handle extraction)
+        # Save image to artifact
         echo "Saving image to /tmp/image.tar..."
         if ! docker save ${IMAGE_NAME}:${IMAGE_TAG} -o /tmp/image.tar; then
           echo "❌ Failed to save image"
@@ -153,19 +137,15 @@ spec:
         # Verify tar file was created
         if [ ! -f /tmp/image.tar ]; then
           echo "❌ Image tar file was not created"
-          echo "Debug: Checking /tmp directory..."
-          ls -la /tmp/ | head -10
           exit 1
         fi
         
-        # Show file size
         FILE_SIZE=$(du -h /tmp/image.tar | cut -f1)
         echo "✅ Image tar created: /tmp/image.tar (${FILE_SIZE})"
-        
-        # Show image info
         docker images ${IMAGE_NAME}:${IMAGE_TAG}
-        
-        echo "✅ Image built successfully: ${IMAGE_NAME}:${IMAGE_TAG}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ Image built successfully"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
       securityContext:
         privileged: true
     outputs:
@@ -177,7 +157,7 @@ spec:
   - name: push-to-harbor
     inputs:
       parameters:
-      - name: repository
+      - name: image
       - name: tag
       artifacts:
       - name: image
@@ -199,19 +179,19 @@ spec:
         
         apk add --no-cache docker-cli curl
         
-        # Harbor configuration
+        # Harbor configuration (same as 04-harbor-build-push.yaml)
         HARBOR_REGISTRY="harborngp.34-147-139-99.sslip.io"
         HARBOR_PROJECT="gil-test"
-        REPOSITORY="{{inputs.parameters.repository}}"
+        IMAGE_NAME="{{inputs.parameters.image}}"
         TAG="{{inputs.parameters.tag}}"
-        FULL_IMAGE="${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${REPOSITORY}:${TAG}"
+        FULL_IMAGE="${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}:${TAG}"
         
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "🚀 Pushing to Harbor Registry"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "Registry: ${HARBOR_REGISTRY}"
         echo "Project: ${HARBOR_PROJECT}"
-        echo "Repository: ${REPOSITORY}"
+        echo "Image: ${IMAGE_NAME}"
         echo "Tag: ${TAG}"
         echo "Full Image: ${FULL_IMAGE}"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -219,10 +199,6 @@ spec:
         # Verify artifact exists
         if [ ! -f /workspace/image.tar ]; then
           echo "❌ Error: /workspace/image.tar not found!"
-          echo ""
-          echo "Debug info:"
-          echo "  Contents of /workspace:"
-          ls -la /workspace/ 2>/dev/null | head -10 || echo "    (empty)"
           exit 1
         fi
         
@@ -230,7 +206,7 @@ spec:
         echo "📦 Loading image..."
         docker load -i /workspace/image.tar
         
-        # Get the original image name (first image in the tar)
+        # Get the original image name
         ORIGINAL_IMAGE=$(docker images --format "{{.Repository}}:{{.Tag}}" | head -1)
         echo "📋 Original image: ${ORIGINAL_IMAGE}"
         
@@ -239,25 +215,22 @@ spec:
         docker tag ${ORIGINAL_IMAGE} ${FULL_IMAGE}
         
         # Verify tag
-        docker images | grep "${HARBOR_PROJECT}/${REPOSITORY}"
+        docker images | grep "${HARBOR_PROJECT}/${IMAGE_NAME}"
         
         # Login to Harbor
         echo "🔐 Logging into Harbor..."
         
-        # Try to use Kubernetes secret first (recommended)
+        # Get token from secret or parameter
         if [ -f /var/secrets/harbor/username ] && [ -f /var/secrets/harbor/password ]; then
           HARBOR_USER=$(cat /var/secrets/harbor/username)
           HARBOR_PASS=$(cat /var/secrets/harbor/password)
           echo "✅ Using credentials from Kubernetes secret"
-        # Fallback to workflow parameters
         elif [ -n "${{workflow.parameters.harbor-username}}" ] && [ -n "${{workflow.parameters.harbor-password}}" ]; then
           HARBOR_USER="${{workflow.parameters.harbor-username}}"
           HARBOR_PASS="${{workflow.parameters.harbor-password}}"
           echo "✅ Using credentials from workflow parameters"
         else
-          echo "⚠️  Harbor credentials not provided"
-          echo "💡 Option 1: Create Kubernetes secret: ./setup-harbor-secret.sh"
-          echo "💡 Option 2: Set parameters: -p harbor-username=user -p harbor-password=pass"
+          echo "❌ Harbor credentials not provided"
           exit 1
         fi
         
@@ -267,7 +240,6 @@ spec:
         echo "🚀 Pushing ${FULL_IMAGE} to Harbor..."
         docker push ${FULL_IMAGE}
         
-        # Verify push
         if [ $? -eq 0 ]; then
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "✅ Successfully pushed to Harbor!"
@@ -279,7 +251,6 @@ spec:
           echo "❌ Failed to push to Harbor"
           exit 1
         fi
-      # Mount Harbor credentials secret (if exists)
       volumeMounts:
       - name: harbor-secret
         mountPath: /var/secrets/harbor
@@ -287,53 +258,23 @@ spec:
       securityContext:
         privileged: true
     volumes:
-    # Harbor credentials secret (optional - will use parameters if secret doesn't exist)
     - name: harbor-secret
       secret:
         secretName: harbor-credentials
         optional: true
 
-  # Verify Harbor Image Template
-  - name: verify-harbor-image
-    inputs:
-      parameters:
-      - name: repository
-      - name: tag
-    container:
-      image: curlimages/curl:latest
-      command: [sh, -c]
-      args:
-      - |
-        HARBOR_REGISTRY="harborngp.34-147-139-99.sslip.io"
-        HARBOR_PROJECT="gil-test"
-        REPOSITORY="{{inputs.parameters.repository}}"
-        TAG="{{inputs.parameters.tag}}"
-        FULL_IMAGE="${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${REPOSITORY}:${TAG}"
-        
-        echo "🔍 Verifying image in Harbor..."
-        echo "Image: ${FULL_IMAGE}"
-        
-        # In a real scenario, you would query Harbor API
-        # For now, we'll just confirm the push was successful
-        echo "✅ Image verification completed"
-        echo "📋 Image available at: ${FULL_IMAGE}"
-
   # Workflow Parameters
   arguments:
     parameters:
     - name: repo-url
-      value: "https://github.com/gilsonbellon/argo-labs.git"
-    - name: revision
+      value: "https://github.com/xxxxxx/vote.git"
+    - name: branch
       value: "main"
-    - name: repository
-      value: "my-app"  # Repository name in Harbor (override with -p repository=your-app)
-    - name: tag
-      value: "{{workflow.name}}"  # Auto-generated unique tag from workflow name (override with -p tag=v1.0.0)
-    - name: dockerfile-path
+    - name: image
+      value: "vote"
+    - name: dockerfile
       value: "Dockerfile"
-    - name: build-context
-      value: "."
     - name: harbor-username
-      value: ""  # Set via: -p harbor-username=admin
+      value: ""  # Optional - will use secret if not provided
     - name: harbor-password
-      value: ""  # Set via: -p harbor-password=your-password
+      value: ""  # Optional - will use secret if not provided

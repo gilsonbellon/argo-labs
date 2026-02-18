@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: github-polling-job
+  namespace: argo-events
+spec:
+  schedule: "* * * * *"  # Poll every minute
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: poller
+            image: schoolofdevops/github-poller:latest
+            env:
+            - name: GITHUB_API_URL
+              value: "https://api.github.com/repos/gilsonbellon/argo-labs/commits"
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token-secret
+                  key: token
+            - name: LAST_COMMIT_FILE
+              value: "/data/last_commit.txt"
+            - name: ARGO_EVENT_SOURCE_URL
+              value: "http://webhook-eventsource-svc.argo-events.svc.cluster.local:12000/github"
+            volumeMounts:
+            - name: commit-storage
+              mountPath: /data
+          restartPolicy: OnFailure
+          volumes:
+          - name: commit-storage
+            persistentVolumeClaim:
+              claimName: poller-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: poller-pvc
+  namespace: argo-events
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Mi

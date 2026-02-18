@@ -1,0 +1,31 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: operate-workflow-sa
+rules:
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workflows
+  - workflowtemplates
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: operate-workflow-sa
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: operate-workflow-sa
+subjects:
+- kind: ServiceAccount
+  name: operate-workflow-sa
+  namespace: argo-events

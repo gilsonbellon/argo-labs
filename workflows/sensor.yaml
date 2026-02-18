@@ -1,0 +1,48 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: polling-sensor
+  namespace: argo-events
+spec:
+  template:
+    serviceAccountName: operate-workflow-sa
+  dependencies:
+    - name: poll-github
+      eventSourceName: webhook
+      eventName: github
+  triggers:
+    - template:
+        name: launch-vote-ci
+        argoWorkflow:
+          operation: submit-from
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: WorkflowTemplate
+              metadata:
+                name: vote-ci-template
+                namespace: argo
+          parameters:
+            - src:
+                dependencyName: poll-github
+                dataTemplate: "https://github.com/gilsonbellon/argo-labs.git"
+              dest: workflow.parameters.repo-url
+            - src:
+                dependencyName: poll-github
+                dataTemplate: "main"
+              dest: workflow.parameters.branch
+            - src:
+                dependencyName: poll-github
+                dataTemplate: "argo-labs"
+              dest: workflow.parameters.image
+            - src:
+                dependencyName: poll-github
+                dataTemplate: ""
+              dest: workflow.parameters.harbor-username
+            - src:
+                dependencyName: poll-github
+                dataTemplate: ""
+              dest: workflow.parameters.harbor-password
+            # Using static values via dataTemplate for now - will update to extract from payload once we verify workflow submission works
+            # dockerfile parameter omitted - workflow template has default "Dockerfile"
+            # harbor-username and harbor-password are empty - will use secret instead
