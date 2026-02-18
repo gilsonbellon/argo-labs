@@ -1,0 +1,84 @@
+---
+# ArgoCD Application for Staging Environment (Helm-based)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: staging-vote-helm
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  
+  # Source configuration - points to Helm chart
+  source:
+    repoURL: https://github.com/gilsonbellon/argo-labs.git
+    targetRevision: HEAD
+    path: helm-deployments/vote-chart  # Path to Helm chart directory
+    
+    # Use Helm instead of Kustomize
+    helm:
+      valueFiles:
+        - helm-deployments/staging-values.yaml  # Path relative to repository root
+      # Optional: specify Helm version
+      # version: v3
+    
+  # Destination cluster and namespace
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: staging
+  
+  # Sync policy
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+---
+# ArgoCD Application for Production Environment (Helm-based)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: prod-vote-helm
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  
+  source:
+    repoURL: https://github.com/gilsonbellon/argo-labs.git
+    targetRevision: HEAD
+    path: helm-deployments/vote-chart  # Path to Helm chart directory
+    
+    # Use Helm instead of Kustomize
+    helm:
+      valueFiles:
+        - helm-deployments/prod-values.yaml  # Path relative to repository root
+    
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

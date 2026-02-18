@@ -1,0 +1,70 @@
+# Production environment values for vote chart
+namespace: prod
+
+replicaCount: 5
+
+image:
+  repository: schoolofdevops/vote
+  tag: "v3"
+  pullPolicy: Always
+
+service:
+  type: NodePort
+  port: 80
+  targetPort: 80
+  nodePort: 30200
+
+previewService:
+  enabled: true
+  type: NodePort
+  port: 80
+  targetPort: 80
+  nodePort: 30300
+
+strategy:
+  type: canary
+  canary:
+    canaryService: vote-preview
+    stableService: vote
+    trafficRouting:
+      nginx:
+        stableIngress: vote
+    steps:
+      - setCanaryScale:
+          replicas: 3
+      - setWeight: 20
+      - pause:
+          duration: 10s
+      - setWeight: 40
+      - pause:
+          duration: 10s
+      - setWeight: 60
+      - pause:
+          duration: 10s
+      - setWeight: 80
+      - pause:
+          duration: 10s
+      - setWeight: 100
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: vote.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "250m"
+    memory: "128Mi"
+
+labels:
+  app: vote
+  tier: front

@@ -1,0 +1,63 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace | default .Release.Namespace }}
+  labels:
+    {{- range $key, $value := .Values.labels }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- range $key, $value := .Values.labels }}
+      {{ $key }}: {{ $value | quote }}
+      {{- end }}
+  strategy:
+    {{- if eq .Values.strategy.type "blueGreen" }}
+    blueGreen:
+      {{- if .Values.strategy.blueGreen.autoPromotionEnabled }}
+      autoPromotionEnabled: {{ .Values.strategy.blueGreen.autoPromotionEnabled }}
+      {{- end }}
+      {{- if .Values.strategy.blueGreen.autoPromotionSeconds }}
+      autoPromotionSeconds: {{ .Values.strategy.blueGreen.autoPromotionSeconds }}
+      {{- end }}
+      activeService: {{ .Values.strategy.blueGreen.activeService }}
+      previewService: {{ .Values.strategy.blueGreen.previewService }}
+    {{- else if eq .Values.strategy.type "canary" }}
+    canary:
+      {{- if .Values.strategy.canary.canaryService }}
+      canaryService: {{ .Values.strategy.canary.canaryService }}
+      {{- end }}
+      {{- if .Values.strategy.canary.stableService }}
+      stableService: {{ .Values.strategy.canary.stableService }}
+      {{- end }}
+      {{- if .Values.strategy.canary.trafficRouting }}
+      trafficRouting:
+        {{- toYaml .Values.strategy.canary.trafficRouting | nindent 8 }}
+      {{- end }}
+      {{- if .Values.strategy.canary.steps }}
+      steps:
+        {{- toYaml .Values.strategy.canary.steps | nindent 8 }}
+      {{- end }}
+    {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- range $key, $value := .Values.labels }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+    spec:
+      containers:
+      - name: {{ .Values.name }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- with .Values.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.service.targetPort }}
+          protocol: TCP

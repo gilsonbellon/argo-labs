@@ -1,0 +1,45 @@
+# Staging environment values for vote chart
+namespace: staging
+
+replicaCount: 1
+
+image:
+  repository: schoolofdevops/vote
+  tag: "v3"
+  pullPolicy: Always
+
+service:
+  type: NodePort
+  port: 80
+  targetPort: 80
+  nodePort: 30000
+
+previewService:
+  enabled: true
+  type: NodePort
+  port: 80
+  targetPort: 80
+  nodePort: 30100
+
+strategy:
+  type: blueGreen
+  blueGreen:
+    autoPromotionEnabled: true
+    autoPromotionSeconds: 30
+    activeService: vote
+    previewService: vote-preview
+
+ingress:
+  enabled: false
+
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "250m"
+    memory: "128Mi"
+
+labels:
+  app: vote
+  tier: front

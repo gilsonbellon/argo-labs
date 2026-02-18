@@ -1,0 +1,95 @@
+# Default values for vote chart
+# This is a YAML-formatted file.
+
+# Application name
+name: vote
+
+# Replica count (only used if autoscaling is disabled)
+replicaCount: 1
+
+# Image configuration
+image:
+  repository: schoolofdevops/vote
+  tag: "v3"
+  pullPolicy: Always
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80
+  # NodePort settings (for staging/preview)
+  nodePort: null
+
+# Preview service configuration (for blue-green deployments)
+previewService:
+  enabled: true
+  type: NodePort
+  port: 80
+  targetPort: 80
+  nodePort: null
+
+# Rollout strategy
+strategy:
+  # Options: blueGreen, canary
+  type: blueGreen
+  
+  # Blue-Green strategy settings
+  blueGreen:
+    autoPromotionEnabled: true
+    autoPromotionSeconds: 30
+    activeService: vote
+    previewService: vote-preview
+  
+  # Canary strategy settings
+  canary:
+    canaryService: vote-preview
+    stableService: vote
+    trafficRouting:
+      nginx:
+        stableIngress: vote
+    steps:
+      - setCanaryScale:
+          replicas: 3
+      - setWeight: 20
+      - pause:
+          duration: 10s
+      - setWeight: 40
+      - pause:
+          duration: 10s
+      - setWeight: 60
+      - pause:
+          duration: 10s
+      - setWeight: 80
+      - pause:
+          duration: 10s
+      - setWeight: 100
+
+# Ingress configuration
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: vote.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Resource limits and requests
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "250m"
+    memory: "128Mi"
+
+# Labels
+labels:
+  app: vote
+  tier: front
+
+# Namespace (will be set by ArgoCD)
+namespace: ""

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: vote
+description: A Helm chart for deploying the vote application using Argo Rollouts
+type: application
+version: 1.0.0
+appVersion: "v3"

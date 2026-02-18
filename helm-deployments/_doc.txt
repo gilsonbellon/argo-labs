@@ -1,0 +1,2 @@
+# Apply the Helm-based ArgoCD Applications
+kubectl apply -f helm-deployments/argocd-applications-helm.yaml

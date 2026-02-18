@@ -1,0 +1,25 @@
+{{- if .Values.previewService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.previewService.name | default (printf "%s-preview" .Values.name) }}
+  namespace: {{ .Values.namespace | default .Release.Namespace }}
+  labels:
+    {{- range $key, $value := .Values.labels }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+spec:
+  type: {{ .Values.previewService.type }}
+  ports:
+  - name: "{{ .Values.previewService.port }}"
+    port: {{ .Values.previewService.port }}
+    protocol: TCP
+    targetPort: {{ .Values.previewService.targetPort }}
+    {{- if and (eq .Values.previewService.type "NodePort") .Values.previewService.nodePort }}
+    nodePort: {{ .Values.previewService.nodePort }}
+    {{- end }}
+  selector:
+    {{- range $key, $value := .Values.labels }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+{{- end }}
