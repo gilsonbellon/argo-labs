@@ -1,0 +1,340 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: jenkins-helm-charts-ci
+  namespace: argo
+  annotations:
+    description: "CI pipeline migrated from Jenkins helm-charts/Jenkinsfile.build - lint, validate, package and push Helm charts to Harbor OCI registry"
+spec:
+  entrypoint: helm-charts-ci
+  serviceAccountName: argo-workflow
+
+  arguments:
+    parameters:
+    - name: repo-url
+      value: "https://bitbucket.org/ngpemsdevs/helm-charts.git"
+    - name: source-branch
+      value: "feature/example"
+    - name: target-branch
+      value: "main"
+
+  templates:
+  - name: helm-charts-ci
+    steps:
+    - - name: checkout
+        template: git-clone
+        arguments:
+          parameters:
+          - name: repo-url
+            value: "{{workflow.parameters.repo-url}}"
+          - name: source-branch
+            value: "{{workflow.parameters.source-branch}}"
+          - name: target-branch
+            value: "{{workflow.parameters.target-branch}}"
+    - - name: detect-changed-charts
+        template: detect-changed-charts
+        arguments:
+          artifacts:
+          - name: source
+            from: "{{steps.checkout.outputs.artifacts.source}}"
+    - - name: yamllint-and-kubeconform
+        template: yamllint-and-kubeconform
+        arguments:
+          parameters:
+          - name: changed-charts
+            value: "{{steps.detect-changed-charts.outputs.parameters.changed-charts}}"
+          artifacts:
+          - name: source
+            from: "{{steps.checkout.outputs.artifacts.source}}"
+    - - name: check-version-bump
+        template: check-version-bump
+        arguments:
+          parameters:
+          - name: changed-charts
+            value: "{{steps.detect-changed-charts.outputs.parameters.changed-charts}}"
+          artifacts:
+          - name: source
+            from: "{{steps.checkout.outputs.artifacts.source}}"
+    - - name: helm-package
+        template: helm-package
+        arguments:
+          parameters:
+          - name: changed-charts
+            value: "{{steps.detect-changed-charts.outputs.parameters.changed-charts}}"
+          artifacts:
+          - name: source
+            from: "{{steps.checkout.outputs.artifacts.source}}"
+    - - name: helm-push
+        template: helm-push
+        arguments:
+          parameters:
+          - name: changed-charts
+            value: "{{steps.detect-changed-charts.outputs.parameters.changed-charts}}"
+          artifacts:
+          - name: source
+            from: "{{steps.checkout.outputs.artifacts.source}}"
+
+  - name: git-clone
+    inputs:
+      parameters:
+      - name: repo-url
+      - name: source-branch
+      - name: target-branch
+    container:
+      image: alpine/git:latest
+      command: [sh, -c]
+      args:
+      - |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📥 Cloning Helm charts repository"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Repo: {{inputs.parameters.repo-url}}"
+        echo "Source branch: {{inputs.parameters.source-branch}}"
+        echo "Target branch: {{inputs.parameters.target-branch}}"
+
+        mkdir -p /workspace
+        git clone {{inputs.parameters.repo-url}} /workspace
+        cd /workspace
+        git fetch origin "{{inputs.parameters.target-branch}}"
+        git fetch origin "{{inputs.parameters.source-branch}}"
+        git checkout "{{inputs.parameters.source-branch}}"
+
+        echo "✅ Checked out source branch: {{inputs.parameters.source-branch}}"
+        git log -1 --oneline || true
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    outputs:
+      artifacts:
+      - name: source
+        path: /workspace
+
+  - name: detect-changed-charts
+    inputs:
+      artifacts:
+      - name: source
+        path: /workspace
+    script:
+      image: alpine/git:latest
+      command: [sh]
+      source: |
+        set -e
+        cd /workspace
+
+        echo "Detecting changed charts between origin/{{workflow.parameters.target-branch}} and origin/{{workflow.parameters.source-branch}}"
+        CHANGED_FILES=$(git diff --name-status "origin/{{workflow.parameters.target-branch}}..origin/{{workflow.parameters.source-branch}}" | awk '{print $2}' || true)
+
+        if [ -z "$CHANGED_FILES" ]; then
+          echo "No changed files detected. Setting CHANGED_CHARTS to empty."
+          echo "" > /tmp/changed_charts
+        else
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+          CHANGED_CHARTS=$(printf "%s\n" "$CHANGED_FILES" | awk -F'/' '{print $1}' | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "Changed charts: $CHANGED_CHARTS"
+          printf "%s" "$CHANGED_CHARTS" > /tmp/changed_charts
+        fi
+    outputs:
+      parameters:
+      - name: changed-charts
+        valueFrom:
+          path: /tmp/changed_charts
+
+  - name: yamllint-and-kubeconform
+    inputs:
+      parameters:
+      - name: changed-charts
+      artifacts:
+      - name: source
+        path: /workspace
+    container:
+      image: harborngp.34-147-139-99.sslip.io/devops/ci-k8s-tools:latest
+      command: [sh, -c]
+      args:
+      - |
+        set -e
+        cd /workspace
+
+        if [ -z "{{inputs.parameters.changed-charts}}" ]; then
+          echo "No changed charts detected. Skipping lint and validation."
+          exit 0
+        fi
+
+        IFS=',' read -r -a charts <<< "{{inputs.parameters.changed-charts}}"
+
+        for chart in "${charts[@]}"; do
+          if [ -z "$chart" ]; then
+            continue
+          fi
+
+          if [ ! -d "$chart" ]; then
+            echo "Skipping non-existent chart directory: $chart"
+            continue
+          fi
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Running yamllint on chart: ${chart}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          helm template test "${chart}/" | yamllint -d /etc/yamllint/config.yaml - || true
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Running kubeconform on chart: ${chart}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          helm template test "${chart}/" | kubeconform -kubernetes-version 1.32.6 -output json -summary -strict -verbose || true
+        done
+
+  - name: check-version-bump
+    inputs:
+      parameters:
+      - name: changed-charts
+      artifacts:
+      - name: source
+        path: /workspace
+    script:
+      image: harborngp.34-147-139-99.sslip.io/devops/ci-k8s-tools:latest
+      command: [sh]
+      source: |
+        set -e
+        cd /workspace
+
+        if [ -z "{{inputs.parameters.changed-charts}}" ]; then
+          echo "No changed charts detected. Skipping version bump check."
+          exit 0
+        fi
+
+        check_version_bump() {
+          chart="$1"
+          chartPath="${chart}/Chart.yaml"
+
+          if [ ! -f "${chartPath}" ]; then
+            echo "No Chart.yaml for ${chart}, skipping."
+            return 0
+          fi
+
+          oldVersion=$(git show "origin/{{workflow.parameters.target-branch}}:${chartPath}" | awk '/^version:/{print $2}' || true)
+          newVersion=$(awk '/^version:/{print $2}' "${chartPath}" || true)
+
+          echo "Chart: ${chart}"
+          echo "  Old version: ${oldVersion}"
+          echo "  New version: ${newVersion}"
+
+          if [ -z "$oldVersion" ] || [ -z "$newVersion" ]; then
+            echo "  Cannot determine versions; failing."
+            return 1
+          fi
+
+          if [ "$oldVersion" = "$newVersion" ]; then
+            echo "❌ Version was not bumped for chart: ${chart}"
+            return 1
+          else
+            echo "✅ Version bumped for chart: ${chart}"
+            return 0
+          fi
+        }
+
+        IFS=',' read -r -a charts <<< "{{inputs.parameters.changed-charts}}"
+        failed=0
+        for chart in "${charts[@]}"; do
+          if [ -z "$chart" ]; then
+            continue
+          fi
+          if ! check_version_bump "$chart"; then
+            failed=1
+          fi
+        done
+
+        if [ "$failed" -ne 0 ]; then
+          echo "One or more charts did not bump version."
+          exit 1
+        fi
+
+  - name: helm-package
+    inputs:
+      parameters:
+      - name: changed-charts
+      artifacts:
+      - name: source
+        path: /workspace
+    container:
+      image: harborngp.34-147-139-99.sslip.io/devops/ci-k8s-tools:latest
+      command: [sh, -c]
+      args:
+      - |
+        set -e
+        cd /workspace
+
+        mkdir -p packaged-charts
+
+        if [ -z "{{inputs.parameters.changed-charts}}" ]; then
+          echo "No changed charts detected. Skipping packaging."
+          exit 0
+        fi
+
+        IFS=',' read -r -a charts <<< "{{inputs.parameters.changed-charts}}"
+        for chart in "${charts[@]}"; do
+          if [ -z "$chart" ]; then
+            continue
+          fi
+          if [ ! -d "$chart" ]; then
+            echo "Skipping non-existent chart directory: $chart"
+            continue
+          fi
+          echo "Packing chart: ${chart}"
+          helm package "${chart}" --destination packaged-charts/
+        done
+
+  - name: helm-push
+    inputs:
+      parameters:
+      - name: changed-charts
+      artifacts:
+      - name: source
+        path: /workspace
+    container:
+      image: harborngp.34-147-139-99.sslip.io/devops/ci-k8s-tools:latest
+      command: [sh, -c]
+      args:
+      - |
+        set -e
+        cd /workspace
+
+        DOCKER_REGISTRY="harborngp.34-147-139-99.sslip.io"
+        DOCKER_REPOSITORY="${DOCKER_REGISTRY}/helm-charts"
+        DOCKER_USER="robot\$helm-charts+jenkins-helmchart-robot"
+
+        if [ -z "{{inputs.parameters.changed-charts}}" ]; then
+          echo "No changed charts detected. Skipping push."
+          exit 0
+        fi
+
+        if [ ! -d "packaged-charts" ]; then
+          echo "No packaged-charts directory found. Did helm-package run?"
+          exit 1
+        fi
+
+        if [ -z "${DOCKER_CREDENTIAL}" ]; then
+          echo "Warning: DOCKER_CREDENTIAL not set. To push to Harbor, run this template with an env var or secret providing the token."
+        fi
+
+        IFS=',' read -r -a charts <<< "{{inputs.parameters.changed-charts}}"
+
+        for chart in "${charts[@]}"; do
+          if [ -z "$chart" ]; then
+            continue
+          fi
+
+          tgz_path=$(ls packaged-charts/${chart}-*.tgz 2>/dev/null || true)
+          if [ -z "$tgz_path" ]; then
+            echo "No packaged chart found for ${chart}, skipping."
+            continue
+          fi
+
+          echo "Logging into Harbor ${DOCKER_REGISTRY}..."
+          if [ -n "${DOCKER_CREDENTIAL}" ]; then
+            helm registry login "${DOCKER_REGISTRY}" -u "${DOCKER_USER}" -p "${DOCKER_CREDENTIAL}"
+          else
+            echo "Helm login will likely fail (no DOCKER_CREDENTIAL)."
+          fi
+
+          echo "Pushing chart ${tgz_path} to oci://${DOCKER_REPOSITORY}"
+          helm push "${tgz_path}" "oci://${DOCKER_REPOSITORY}" || true
+        done
+

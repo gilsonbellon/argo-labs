@@ -226,3 +226,8 @@ kubectl logs -n argo -l app=workflow-controller --tail=20
 kubectl port-forward -n argo svc/minio 9001:9001
 
 
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj-labs/argocd-image-updater/master/config/install.yaml
+
+
+kubectl port-forward -n sonarqube svc/sonarqube 9000:9000
+kubectl apply -f /Volumes/X9Pro/Labs/uabsd/argo-labs/workflows/poller-cronjob.yaml

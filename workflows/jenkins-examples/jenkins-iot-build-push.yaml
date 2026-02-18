@@ -1,0 +1,196 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: jenkins-iot-build-push
+  namespace: argo
+  annotations:
+    description: "CI pipeline migrated from Jenkins iot-pipelines/Jenkinsfile.build - build and push Docker image to Harbor"
+spec:
+  entrypoint: iot-build-push
+  serviceAccountName: argo-workflow
+
+  arguments:
+    parameters:
+    - name: app-repo
+      value: "https://bitbucket.org/ngpemsdevs/data-pipelines-new.git"
+    - name: app-path
+      value: "."            # corresponds to ${jobPath}
+    - name: app-prefix
+      value: "example-app"  # corresponds to ${jobName}
+    - name: app-branch
+      value: "main"         # corresponds to ${jobBranch}
+    - name: app-env
+      value: "staging"      # corresponds to ${jobEnv}
+    - name: hash-commit
+      value: "HEAD"         # used to derive tag; overridden by callers
+    - name: npm-token
+      value: ""             # optional, can be wired to a secret-mounted env
+
+  templates:
+  - name: iot-build-push
+    steps:
+    - - name: checkout
+        template: git-clone
+        arguments:
+          parameters:
+          - name: repo-url
+            value: "{{workflow.parameters.app-repo}}"
+          - name: branch
+            value: "{{workflow.parameters.app-branch}}"
+    - - name: build-and-push
+        template: docker-build-and-push
+        arguments:
+          parameters:
+          - name: app-path
+            value: "{{workflow.parameters.app-path}}"
+          - name: app-prefix
+            value: "{{workflow.parameters.app-prefix}}"
+          - name: app-env
+            value: "{{workflow.parameters.app-env}}"
+          - name: hash-commit
+            value: "{{workflow.parameters.hash-commit}}"
+          - name: npm-token
+            value: "{{workflow.parameters.npm-token}}"
+          artifacts:
+          - name: source
+            from: "{{steps.checkout.outputs.artifacts.source}}"
+
+  - name: git-clone
+    inputs:
+      parameters:
+      - name: repo-url
+      - name: branch
+    container:
+      image: alpine/git:latest
+      command: [sh, -c]
+      args:
+      - |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📥 Cloning repository"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Repo: {{inputs.parameters.repo-url}}"
+        echo "Branch: {{inputs.parameters.branch}}"
+
+        mkdir -p /workspace
+        git clone {{inputs.parameters.repo-url}} /workspace
+
+        cd /workspace
+        BRANCH="{{inputs.parameters.branch}}"
+        BRANCH=$(echo "$BRANCH" | sed 's|refs/heads/||')
+        git checkout "$BRANCH"
+
+        echo "✅ Checked out branch: $BRANCH"
+        echo "📋 Latest commit:"
+        git log -1 --oneline || true
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    outputs:
+      artifacts:
+      - name: source
+        path: /workspace
+
+  - name: docker-build-and-push
+    inputs:
+      parameters:
+      - name: app-path
+      - name: app-prefix
+      - name: app-env
+      - name: hash-commit
+      - name: npm-token
+      artifacts:
+      - name: source
+        path: /workspace
+    container:
+      image: docker:dind
+      command: [sh, -c]
+      args:
+      - |
+        dockerd-entrypoint.sh &
+        sleep 5
+
+        until docker info >/dev/null 2>&1; do
+          echo "Waiting for Docker daemon..."
+          sleep 1
+        done
+
+        apk add --no-cache docker-cli
+
+        cd /workspace
+
+        DOCKER_REGISTRY="harborngp.34-147-139-99.sslip.io"
+        DOCKER_PROJECT="iot-pipelines"
+        DOCKER_USER="robot\$jenkins"
+
+        APP_PATH="{{inputs.parameters.app-path}}"
+        APP_PREFIX="{{inputs.parameters.app-prefix}}"
+        APP_ENV="{{inputs.parameters.app-env}}"
+        HASH_COMMIT="{{inputs.parameters.hash-commit}}"
+        NPM_TOKEN="{{inputs.parameters.npm-token}}"
+
+        if [ "$HASH_COMMIT" = "HEAD" ]; then
+          HASH_COMMIT=$(git rev-parse HEAD)
+        fi
+        SHORT_SHA=$(printf "%s" "$HASH_COMMIT" | cut -c1-7)
+        IMAGE_TAG="${APP_ENV}-${APP_PREFIX}:${SHORT_SHA}"
+
+        FULL_REPO="${DOCKER_REGISTRY}/${DOCKER_PROJECT}"
+        FULL_IMAGE="${FULL_REPO}/${IMAGE_TAG}"
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🔨 Building Docker image"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "App path: ${APP_PATH}"
+        echo "Image: ${FULL_IMAGE}"
+
+        if [ -n "$NPM_TOKEN" ]; then
+          BUILD_ARGS="--build-arg NPM_TOKEN=${NPM_TOKEN}"
+        else
+          BUILD_ARGS=""
+        fi
+
+        echo "Logging in to Harbor registry..."
+        if [ -f /var/secrets/harbor/username ] && [ -f /var/secrets/harbor/password ]; then
+          HARBOR_USER=$(cat /var/secrets/harbor/username)
+          HARBOR_PASS=$(cat /var/secrets/harbor/password)
+        else
+          echo "❌ Harbor credentials secret not mounted at /var/secrets/harbor"
+          exit 1
+        fi
+
+        echo "$HARBOR_PASS" | docker login "${DOCKER_REGISTRY}" -u "${HARBOR_USER}" --password-stdin
+
+        if [ ! -d "${APP_PATH}" ]; then
+          echo "❌ App path ${APP_PATH} does not exist in cloned repo"
+          ls -la
+          exit 1
+        fi
+
+        DOCKERFILE_PATH="${APP_PATH}/Dockerfile"
+        if [ ! -f "${DOCKERFILE_PATH}" ]; then
+          echo "❌ Dockerfile not found at ${DOCKERFILE_PATH}"
+          exit 1
+        fi
+
+        docker build ${BUILD_ARGS} -t "${FULL_IMAGE}" -f "${DOCKERFILE_PATH}" "${APP_PATH}"
+
+        if ! docker images "${FULL_IMAGE}" | grep -q "${DOCKER_PROJECT}/${APP_PREFIX}"; then
+          echo "⚠️  Image built but repository listing did not match expected prefix; continuing"
+        fi
+
+        echo "📤 Pushing image to Harbor: ${FULL_IMAGE}"
+        docker push "${FULL_IMAGE}"
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ Image build and push complete"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      securityContext:
+        privileged: true
+      volumeMounts:
+      - name: harbor-secret
+        mountPath: /var/secrets/harbor
+        readOnly: true
+    volumes:
+    - name: harbor-secret
+      secret:
+        secretName: harbor-credentials
+        optional: true
+
