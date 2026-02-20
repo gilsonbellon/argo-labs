@@ -1,0 +1,374 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: database-operations
+  namespace: argo
+  annotations:
+    description: "Database operations workflow - connect, test queries, create users, execute dynamic SQL (PostgreSQL)"
+spec:
+  entrypoint: database-pipeline
+  serviceAccountName: argo-workflow
+  
+  # Workflow parameters
+  arguments:
+    parameters:
+    - name: db-host
+      default: "postgresql.default.svc.cluster.local"
+    - name: db-port
+      default: "5432"
+    - name: db-name
+      default: "testdb"
+    - name: db-admin-user
+      default: "postgres"
+    - name: db-admin-password
+      default: ""  # Should come from secret
+    - name: new-username
+      default: "testuser"
+    - name: new-user-password
+      default: ""  # Will be generated if empty
+    - name: new-user-database
+      default: "testdb"  # Database to grant access to
+    - name: custom-query
+      default: "SELECT version();"  # Custom SQL query to execute
+  
+  templates:
+  - name: database-pipeline
+    steps:
+    # Step 1: Test database connection
+    - - name: test-connection
+        template: test-db-connection
+        arguments:
+          parameters:
+          - name: db-host
+            value: "{{workflow.parameters.db-host}}"
+          - name: db-port
+            value: "{{workflow.parameters.db-port}}"
+          - name: db-name
+            value: "{{workflow.parameters.db-name}}"
+          - name: db-admin-user
+            value: "{{workflow.parameters.db-admin-user}}"
+          - name: db-admin-password
+            value: "{{workflow.parameters.db-admin-password}}"
+    
+    # Step 2: Execute dynamic queries
+    - - name: run-dynamic-queries
+        template: execute-sql-queries
+        arguments:
+          parameters:
+          - name: db-host
+            value: "{{workflow.parameters.db-host}}"
+          - name: db-port
+            value: "{{workflow.parameters.db-port}}"
+          - name: db-name
+            value: "{{workflow.parameters.db-name}}"
+          - name: db-admin-user
+            value: "{{workflow.parameters.db-admin-user}}"
+          - name: db-admin-password
+            value: "{{workflow.parameters.db-admin-password}}"
+          - name: custom-query
+            value: "{{workflow.parameters.custom-query}}"
+    
+    # Step 3: Create database user
+    - - name: create-user
+        template: create-db-user
+        arguments:
+          parameters:
+          - name: db-host
+            value: "{{workflow.parameters.db-host}}"
+          - name: db-port
+            value: "{{workflow.parameters.db-port}}"
+          - name: db-admin-user
+            value: "{{workflow.parameters.db-admin-user}}"
+          - name: db-admin-password
+            value: "{{workflow.parameters.db-admin-password}}"
+          - name: new-username
+            value: "{{workflow.parameters.new-username}}"
+          - name: new-user-password
+            value: "{{workflow.parameters.new-user-password}}"
+          - name: new-user-database
+            value: "{{workflow.parameters.new-user-database}}"
+    
+    # Step 4: Test new user connection
+    - - name: test-new-user
+        template: test-user-connection
+        arguments:
+          parameters:
+          - name: db-host
+            value: "{{workflow.parameters.db-host}}"
+          - name: db-port
+            value: "{{workflow.parameters.db-port}}"
+          - name: db-name
+            value: "{{workflow.parameters.new-user-database}}"
+          - name: username
+            value: "{{workflow.parameters.new-username}}"
+          - name: password
+            value: "{{workflow.parameters.new-user-password}}"
+
+  # Template: Test database connection
+  - name: test-db-connection
+    inputs:
+      parameters:
+      - name: db-host
+      - name: db-port
+      - name: db-name
+      - name: db-admin-user
+      - name: db-admin-password
+    container:
+      image: postgres:15-alpine
+      command: [sh, -c]
+      env:
+      - name: PGHOST
+        value: "{{inputs.parameters.db-host}}"
+      - name: PGPORT
+        value: "{{inputs.parameters.db-port}}"
+      - name: PGDATABASE
+        value: "{{inputs.parameters.db-name}}"
+      - name: PGUSER
+        value: "{{inputs.parameters.db-admin-user}}"
+      - name: PGPASSWORD
+        value: "{{inputs.parameters.db-admin-password}}"
+      args:
+      - |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🔌 Testing Database Connection"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Host: $PGHOST"
+        echo "Port: $PGPORT"
+        echo "Database: $PGDATABASE"
+        echo "User: $PGUSER"
+        echo ""
+        
+        echo "⏳ Connecting to PostgreSQL..."
+        if psql -c "SELECT version();" > /dev/null 2>&1; then
+          echo "✅ PostgreSQL connection successful!"
+          echo ""
+          echo "📊 Database Information:"
+          psql -c "SELECT version();"
+          echo ""
+          psql -c "SELECT current_database(), current_user, inet_server_addr(), inet_server_port();"
+        else
+          echo "❌ PostgreSQL connection failed!"
+          exit 1
+        fi
+        
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ Connection test completed"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # Template: Execute dynamic SQL queries
+  - name: execute-sql-queries
+    inputs:
+      parameters:
+      - name: db-host
+      - name: db-port
+      - name: db-name
+      - name: db-admin-user
+      - name: db-admin-password
+      - name: custom-query
+    container:
+      image: postgres:15-alpine
+      command: [sh, -c]
+      env:
+      - name: PGHOST
+        value: "{{inputs.parameters.db-host}}"
+      - name: PGPORT
+        value: "{{inputs.parameters.db-port}}"
+      - name: PGDATABASE
+        value: "{{inputs.parameters.db-name}}"
+      - name: PGUSER
+        value: "{{inputs.parameters.db-admin-user}}"
+      - name: PGPASSWORD
+        value: "{{inputs.parameters.db-admin-password}}"
+      - name: CUSTOM_QUERY
+        value: "{{inputs.parameters.custom-query}}"
+      args:
+      - |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📝 Executing Dynamic SQL Queries"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        echo "1️⃣  Listing all databases:"
+        psql -c "\l" || true
+        echo ""
+        
+        echo "2️⃣  Listing all tables in current database:"
+        psql -c "\dt" || true
+        echo ""
+        
+        echo "3️⃣  Showing current database size:"
+        psql -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;" || true
+        echo ""
+        
+        echo "4️⃣  Listing all users/roles:"
+        psql -c "\du" || true
+        echo ""
+        
+        echo "5️⃣  Custom query: $CUSTOM_QUERY"
+        psql -c "$CUSTOM_QUERY" || true
+        echo ""
+        
+        echo "6️⃣  Example: Create a test table (if not exists):"
+        psql -c "
+          CREATE TABLE IF NOT EXISTS workflow_test (
+            id SERIAL PRIMARY KEY,
+            workflow_name VARCHAR(255),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status VARCHAR(50)
+          );
+        " || true
+        
+        echo "7️⃣  Example: Insert test data:"
+        psql -c "
+          INSERT INTO workflow_test (workflow_name, status)
+          VALUES ('{{workflow.name}}', 'running')
+          ON CONFLICT DO NOTHING;
+        " || true
+        
+        echo "8️⃣  Example: Query test data:"
+        psql -c "SELECT * FROM workflow_test ORDER BY created_at DESC LIMIT 5;" || true
+        
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ SQL queries executed"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # Template: Create database user
+  - name: create-db-user
+    inputs:
+      parameters:
+      - name: db-host
+      - name: db-port
+      - name: db-admin-user
+      - name: db-admin-password
+      - name: new-username
+      - name: new-user-password
+      - name: new-user-database
+    container:
+      image: postgres:15-alpine
+      command: [sh, -c]
+      env:
+      - name: PGHOST
+        value: "{{inputs.parameters.db-host}}"
+      - name: PGPORT
+        value: "{{inputs.parameters.db-port}}"
+      - name: PGDATABASE
+        value: "postgres"  # Connect to postgres DB to create users
+      - name: PGUSER
+        value: "{{inputs.parameters.db-admin-user}}"
+      - name: PGPASSWORD
+        value: "{{inputs.parameters.db-admin-password}}"
+      - name: NEW_USERNAME
+        value: "{{inputs.parameters.new-username}}"
+      - name: NEW_USER_PASSWORD
+        value: "{{inputs.parameters.new-user-password}}"
+      - name: NEW_USER_DATABASE
+        value: "{{inputs.parameters.new-user-database}}"
+      args:
+      - |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "👤 Creating Database User"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Username: $NEW_USERNAME"
+        echo "Database: $NEW_USER_DATABASE"
+        echo ""
+        
+        # Generate password if not provided
+        USER_PASSWORD="$NEW_USER_PASSWORD"
+        if [ -z "$USER_PASSWORD" ]; then
+          USER_PASSWORD=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
+          echo "🔑 Generated password: ${USER_PASSWORD}"
+        else
+          echo "🔑 Using provided password"
+        fi
+        
+        echo "⏳ Creating PostgreSQL user..."
+        
+        # Check if user exists
+        USER_EXISTS=$(psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$NEW_USERNAME'")
+        
+        if [ "$USER_EXISTS" = "1" ]; then
+          echo "⚠️  User '$NEW_USERNAME' already exists, updating password..."
+          psql -c "ALTER USER $NEW_USERNAME WITH PASSWORD '${USER_PASSWORD}';" || exit 1
+        else
+          echo "➕ Creating new user..."
+          psql -c "CREATE USER $NEW_USERNAME WITH PASSWORD '${USER_PASSWORD}';" || exit 1
+        fi
+        
+        # Grant privileges on database
+        echo "🔐 Granting privileges on database '$NEW_USER_DATABASE'..."
+        psql -c "GRANT ALL PRIVILEGES ON DATABASE $NEW_USER_DATABASE TO $NEW_USERNAME;" || true
+        
+        # Connect to the target database and grant schema privileges
+        export PGDATABASE="$NEW_USER_DATABASE"
+        psql -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO $NEW_USERNAME;" || true
+        psql -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO $NEW_USERNAME;" || true
+        psql -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO $NEW_USERNAME;" || true
+        
+        echo "✅ PostgreSQL user created successfully!"
+        echo ""
+        echo "📋 User details:"
+        export PGDATABASE="postgres"
+        psql -c "\du $NEW_USERNAME"
+        
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ User creation completed"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "📝 Connection details for new user:"
+        echo "   Host: $PGHOST"
+        echo "   Port: $PGPORT"
+        echo "   Database: $NEW_USER_DATABASE"
+        echo "   Username: $NEW_USERNAME"
+        echo "   Password: ${USER_PASSWORD}"
+        echo ""
+        echo "💾 Save these credentials securely!"
+
+  # Template: Test new user connection
+  - name: test-user-connection
+    inputs:
+      parameters:
+      - name: db-host
+      - name: db-port
+      - name: db-name
+      - name: username
+      - name: password
+    container:
+      image: postgres:15-alpine
+      command: [sh, -c]
+      env:
+      - name: PGHOST
+        value: "{{inputs.parameters.db-host}}"
+      - name: PGPORT
+        value: "{{inputs.parameters.db-port}}"
+      - name: PGDATABASE
+        value: "{{inputs.parameters.db-name}}"
+      - name: PGUSER
+        value: "{{inputs.parameters.username}}"
+      - name: PGPASSWORD
+        value: "{{inputs.parameters.password}}"
+      args:
+      - |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🧪 Testing New User Connection"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Username: $PGUSER"
+        echo "Database: $PGDATABASE"
+        echo ""
+        
+        echo "⏳ Testing PostgreSQL connection..."
+        if psql -c "SELECT current_user, current_database();" > /dev/null 2>&1; then
+          echo "✅ Connection successful!"
+          echo ""
+          echo "📊 User can access database:"
+          psql -c "SELECT current_user, current_database();"
+          echo ""
+          echo "📋 User can list tables:"
+          psql -c "\dt" || echo "No tables found (this is OK)"
+        else
+          echo "❌ Connection failed!"
+          exit 1
+        fi
+        
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ User connection test completed"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

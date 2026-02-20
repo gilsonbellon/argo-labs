@@ -1,0 +1,22 @@
+# Override values for Garage Helm chart (small clusters, e.g. Kind)
+# Use: helm install ... -f values-override.yaml
+# See: https://garagehq.deuxfleurs.fr/documentation/cookbook/kubernetes/
+
+garage:
+  # Use SQLite instead of LMDB to avoid "Function not implemented" (os error 38)
+  # in Kind/Docker and other restricted container environments where LMDB mmap fails.
+  dbEngine: "sqlite"
+  # Replication: use 1 for single-node / dev; 2+ for HA
+  replicationMode: "1"
+
+# Fewer replicas for local/small clusters
+deployment:
+  replicaCount: 1
+
+# Persistence (adjust storageClass for your cluster)
+persistence:
+  enabled: true
+  meta:
+    size: 100Mi
+  data:
+    size: 1Gi

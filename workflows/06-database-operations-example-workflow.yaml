@@ -1,0 +1,30 @@
+# Example Workflow manifest to submit from the database-operations WorkflowTemplate
+# Usage: kubectl apply -f 06-database-operations-example-workflow.yaml -n argo
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: database-operations-
+  namespace: argo
+spec:
+  workflowTemplateRef:
+    name: database-operations
+  arguments:
+    parameters:
+    - name: db-host
+      value: "postgresql.default.svc.cluster.local"
+    - name: db-port
+      value: "5432"
+    - name: db-name
+      value: "testdb"
+    - name: db-admin-user
+      value: "postgres"
+    - name: db-admin-password
+      value: ""  # Replace with your password or use a secret
+    - name: new-username
+      value: "testuser"
+    - name: new-user-password
+      value: ""  # Will be auto-generated if empty
+    - name: new-user-database
+      value: "testdb"
+    - name: custom-query
+      value: "SELECT version();"

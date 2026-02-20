@@ -1,0 +1,371 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: moderate-build-test-garage
+  namespace: argo
+  annotations:
+    description: "Moderate workflow (Garage) - same as moderate-build-test but use when artifact repository is Garage; builds Docker image and runs tests, does NOT push to registry"
+spec:
+  entrypoint: build-and-test
+  serviceAccountName: argo-workflow
+
+  templates:
+  - name: build-and-test
+    steps:
+    # Step 1: Checkout code
+    - - name: checkout
+        template: git-clone
+        arguments:
+          parameters:
+          - name: url
+            value: "{{workflow.parameters.repo-url}}"
+          - name: revision
+            value: "{{workflow.parameters.revision}}"
+
+    # Step 2: Build and quality checks in parallel
+    - - name: build-image
+        template: docker-build
+        arguments:
+          parameters:
+          - name: image-name
+            value: "{{workflow.parameters.image-name}}"
+          - name: image-tag
+            value: "{{workflow.name}}"
+          artifacts:
+          - name: source
+            from: "{{steps.checkout.outputs.artifacts.source}}"
+      - name: lint-code
+        template: code-lint
+        arguments:
+          artifacts:
+          - name: source
+            from: "{{steps.checkout.outputs.artifacts.source}}"
+      - name: security-scan
+        template: security-scan-code
+        arguments:
+          artifacts:
+          - name: source
+            from: "{{steps.checkout.outputs.artifacts.source}}"
+
+    # Step 3: Run tests with built image
+    - - name: integration-tests
+        template: test-built-image
+        arguments:
+          artifacts:
+          - name: source
+            from: "{{steps.checkout.outputs.artifacts.source}}"
+          - name: image
+            from: "{{steps.build-image.outputs.artifacts.image}}"
+
+    # Step 4: Generate build report (no push)
+    - - name: build-report
+        template: generate-build-report
+        arguments:
+          parameters:
+          - name: image-name
+            value: "{{workflow.parameters.image-name}}"
+          - name: image-tag
+            value: "{{workflow.name}}"
+
+  # Git Clone Template
+  - name: git-clone
+    inputs:
+      parameters:
+      - name: url
+      - name: revision
+    container:
+      image: alpine/git:latest
+      command: [sh, -c]
+      args:
+      - |
+        echo "📥 Cloning repository..."
+        git clone {{inputs.parameters.url}} /workspace
+        cd /workspace
+        git checkout {{inputs.parameters.revision}}
+        echo "✅ Checked out {{inputs.parameters.revision}}"
+    outputs:
+      artifacts:
+      - name: source
+        path: /workspace
+
+  # Docker Build Template
+  - name: docker-build
+    inputs:
+      parameters:
+      - name: image-name
+      - name: image-tag
+      artifacts:
+      - name: source
+        path: /workspace
+    container:
+      image: docker:dind
+      command: [sh, -c]
+      args:
+      - |
+        # Start Docker daemon
+        dockerd-entrypoint.sh &
+        sleep 5
+
+        # Wait for Docker daemon to be ready
+        until docker info >/dev/null 2>&1; do
+          echo "Waiting for Docker daemon..."
+          sleep 1
+        done
+
+        apk add --no-cache docker-cli
+        cd /workspace
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🔨 Building Docker Image"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        # Check if Dockerfile exists
+        if [ ! -f Dockerfile ]; then
+          echo "⚠️  No Dockerfile found, creating a simple one..."
+          cat > Dockerfile <<EOF
+        FROM alpine:latest
+        RUN apk add --no-cache curl
+        WORKDIR /app
+        COPY . /app
+        CMD ["sh"]
+        EOF
+        fi
+
+        echo "Building {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}}..."
+        if ! docker build -t {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}} .; then
+          echo "❌ Docker build failed"
+          exit 1
+        fi
+
+        # Verify image was created
+        if ! docker images {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}} | grep -q {{inputs.parameters.image-name}}; then
+          echo "❌ Image was not created"
+          exit 1
+        fi
+
+        # Save image
+        echo "Saving image to /tmp/image.tar..."
+        if ! docker save {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}} -o /tmp/image.tar; then
+          echo "❌ Failed to save image"
+          exit 1
+        fi
+
+        # Verify tar file was created
+        if [ ! -f /tmp/image.tar ]; then
+          echo "❌ Image tar file was not created"
+          echo "Debug: Checking /tmp directory..."
+          ls -la /tmp/ | head -10
+          exit 1
+        fi
+
+        # Show file size
+        FILE_SIZE=$(du -h /tmp/image.tar | cut -f1)
+        echo "✅ Image tar created: /tmp/image.tar (${FILE_SIZE})"
+
+        # Show image info
+        docker images {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}}
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ Image built and saved successfully"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      securityContext:
+        privileged: true
+    outputs:
+      artifacts:
+      - name: image
+        path: /tmp/image.tar
+
+  # Code Lint Template
+  - name: code-lint
+    inputs:
+      artifacts:
+      - name: source
+        path: /workspace
+    container:
+      image: alpine:latest
+      command: [sh, -c]
+      args:
+      - |
+        apk add --no-cache hadolint shellcheck
+        cd /workspace
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🔍 Running Code Linting"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        # Lint Dockerfile
+        if [ -f Dockerfile ]; then
+          echo "Linting Dockerfile..."
+          hadolint Dockerfile || echo "⚠️  Lint warnings found"
+        else
+          echo "ℹ️  No Dockerfile found, skipping Dockerfile lint"
+        fi
+
+        # Check for common code issues
+        echo "Checking code quality..."
+        find . -name "*.sh" -exec shellcheck {} \; 2>/dev/null || echo "ℹ️  No shell scripts found or ShellCheck completed"
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ Linting completed"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # Security Scan Template
+  - name: security-scan-code
+    inputs:
+      artifacts:
+      - name: source
+        path: /workspace
+    container:
+      image: aquasec/trivy:latest
+      command: [sh, -c]
+      args:
+      - |
+        cd /workspace
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🔒 Running Security Scan"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        # Scan filesystem
+        trivy fs --exit-code 0 --severity HIGH,CRITICAL /workspace || echo "⚠️  Security issues found (non-blocking)"
+
+        # Scan Dockerfile if exists
+        if [ -f Dockerfile ]; then
+          echo "Scanning Dockerfile..."
+          trivy config Dockerfile || echo "⚠️  Dockerfile scan completed"
+        fi
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ Security scan completed"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # Test Built Image Template
+  - name: test-built-image
+    inputs:
+      artifacts:
+      - name: source
+        path: /workspace
+      # Use /workspace path to avoid mount conflicts with /tmp
+      - name: image
+        path: /workspace/image.tar
+    container:
+      image: docker:dind
+      command: [sh, -c]
+      args:
+      - |
+        # Start Docker daemon
+        dockerd-entrypoint.sh &
+        sleep 5
+
+        # Wait for Docker daemon to be ready
+        until docker info >/dev/null 2>&1; do
+          echo "Waiting for Docker daemon..."
+          sleep 1
+        done
+
+        apk add --no-cache docker-cli curl
+
+        # Verify artifact exists (Argo automatically downloads and decompresses it)
+        if [ ! -f /workspace/image.tar ]; then
+          echo "❌ Error: /workspace/image.tar not found!"
+          echo ""
+          echo "Debug info:"
+          echo "  Contents of /workspace:"
+          ls -la /workspace/ 2>/dev/null | head -10 || echo "    (empty)"
+          echo ""
+          echo "  This usually means the artifact wasn't downloaded from Garage."
+          echo "  Check init container logs: kubectl logs <pod-name> -c init"
+          exit 1
+        fi
+
+        # Show artifact info
+        FILE_SIZE=$(du -h /workspace/image.tar | cut -f1)
+        echo "✅ Artifact found: /workspace/image.tar (${FILE_SIZE})"
+
+        # Load Docker image from artifact
+        echo "Loading Docker image from /workspace/image.tar..."
+        docker load -i /workspace/image.tar
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🧪 Testing Built Image"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        # List all images to debug
+        echo "Available images:"
+        docker images
+
+        # Get image name from loaded images (most recent one)
+        IMAGE_NAME=$(docker images --format "{{.Repository}}:{{.Tag}}" | head -1)
+
+        if [ -z "$IMAGE_NAME" ] || [ "$IMAGE_NAME" == "<none>:<none>" ]; then
+          echo "⚠️  Could not determine image name, trying alternative method..."
+          # Try getting image ID instead
+          IMAGE_ID=$(docker images -q | head -1)
+          if [ -n "$IMAGE_ID" ]; then
+            IMAGE_NAME=$IMAGE_ID
+            echo "Using image ID: ${IMAGE_NAME}"
+          else
+            echo "❌ No image found after loading"
+            exit 1
+          fi
+        else
+          echo "Testing image: ${IMAGE_NAME}"
+        fi
+
+        # Start container with explicit command
+        CONTAINER_ID=$(docker run -d ${IMAGE_NAME} sh -c "sleep 30")
+        sleep 3
+
+        # Run tests - check if container is running
+        if docker ps --no-trunc --format "{{.ID}}" | grep -Fq "${CONTAINER_ID}"; then
+          echo "✅ Container started successfully"
+          echo "Running container tests..."
+          docker logs $CONTAINER_ID
+
+          # Basic health check
+          echo "Performing health checks..."
+          docker exec $CONTAINER_ID sh -c "echo 'Health check passed'" || echo "Health check completed"
+
+          docker stop $CONTAINER_ID
+          docker rm $CONTAINER_ID
+          echo "✅ Image tests passed"
+        else
+          echo "❌ Container failed to start"
+          exit 1
+        fi
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ Integration tests completed"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      securityContext:
+        privileged: true
+
+  # Generate Build Report Template
+  - name: generate-build-report
+    inputs:
+      parameters:
+      - name: image-name
+      - name: image-tag
+    container:
+      image: alpine:latest
+      command: [sh, -c]
+      args:
+      - |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📊 Build Report"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Workflow: {{workflow.name}}"
+        echo "Image: {{inputs.parameters.image-name}}:{{inputs.parameters.image-tag}}"
+        echo "Status: {{workflow.status}}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "ℹ️  Image built but NOT pushed to registry"
+        echo "✅ Build workflow completed"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # Workflow Parameters
+  arguments:
+    parameters:
+    - name: repo-url
+      value: "https://github.com/gilsonbellon/argo-labs.git"
+    - name: revision
+      value: "main"
+    - name: image-name
+      value: "test-app"

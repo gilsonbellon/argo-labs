@@ -221,7 +221,7 @@ kubectl rollout status deployment workflow-controller -n argo --timeout=60s
 # Check logs
 kubectl logs -n argo -l app=workflow-controller --tail=20
 
-
+kubectl argo rollouts dashboard -p 3100
 
 kubectl port-forward -n argo svc/minio 9001:9001
 
@@ -231,3 +231,68 @@ kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj-labs/argoc
 
 kubectl port-forward -n sonarqube svc/sonarqube 9000:9000
 kubectl apply -f /Volumes/X9Pro/Labs/uabsd/argo-labs/workflows/poller-cronjob.yaml
+
+
+# In argo namespace (where workflows run)
+kubectl delete pods -n argo --field-selector=status.phase==Succeeded
+
+# Or in all namespaces
+kubectl delete pods --all-namespaces --field-selector=status.phase==Succeeded
+
+
+Option 1:
+
+# List buckets
+kubectl exec -n garage garage-0 -- ./garage bucket list
+
+# List objects in the argo-workflows bucket
+kubectl exec -n garage garage-0 -- ./garage bucket info argo-workflows
+
+# Get more details about the bucket
+kubectl exec -n garage garage-0 -- ./garage bucket info argo-workflows --json
+
+Option 2:
+
+# Port-forward Garage S3 API
+kubectl port-forward -n garage svc/garage 3900:3900
+
+# In another terminal, set up AWS CLI to use Garage
+export AWS_ACCESS_KEY_ID='GK6f7aa886adb81909b487b5ee'
+export AWS_SECRET_ACCESS_KEY='08a4fcabe7c4427292bf4804be62fdd2394b63a1822cb14919757b7e680691e9'
+export AWS_ENDPOINT_URL='http://localhost:3900'
+export AWS_DEFAULT_REGION='garage'
+
+# List buckets
+aws s3 ls
+
+# List objects in argo-workflows bucket
+aws s3 ls s3://argo-workflows/
+
+# List recursively (to see all objects)
+aws s3 ls s3://argo-workflows/ --recursive
+
+Option 3:
+
+# Port-forward first (if not already done)
+kubectl port-forward -n garage svc/garage 3900:3900
+
+# In another terminal, configure mc
+mc alias set garage http://localhost:3900 GK6f7aa886adb81909b487b5ee 08a4fcabe7c4427292bf4804be62fdd2394b63a1822cb14919757b7e680691e9
+
+# List buckets
+mc ls garage/
+
+# List objects in bucket
+mc ls garage/argo-workflows/
+
+# List recursively
+mc ls garage/argo-workflows/ --recursive
+
+Option 4:
+
+# Exec into the pod
+kubectl exec -it -n garage garage-0 -- /bin/sh
+
+# Then inside the pod:
+./garage bucket list
+./garage bucket info argo-workflows
